@@ -26,6 +26,7 @@ type Crawler struct {
 	errors     chan error      //Channel for collecting errors
 	wg         sync.WaitGroup  //WaitGroup to sync goroutines
 	limiter    *rate.Limiter   //Rate limiter for HTTP requests
+	client     *http.Client    //HTTP client for fetching URL's
 }
 
 // NewCrawler initializes a new Crawler with the given base URL, max depth, and max visited URL's.
@@ -34,14 +35,25 @@ func NewCrawler(baseURL string, maxDepth int, maxVisited int) (*Crawler, error) 
 	if err != nil {                      //Check if the URL is invalid
 		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
+	//Create HTTP client for fetching URL's
+	client := &http.Client{
+		Timeout: 10 * time.Second, //Timeout after 10 seconds
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 20 { //Check if redirect limit is reached
+				return fmt.Errorf("stopped after 20 redirects")
+			}
+			return nil
+		},
+	}
 	return &Crawler{
 		visited:    make(map[string]bool),
 		maxDepth:   maxDepth,
 		maxVisited: maxVisited,
 		baseURL:    parsedURL,
-		results:    make(chan string, 100),
-		errors:     make(chan error, 100),
+		results:    make(chan string, 1000),                       //Channel for collecting crawled URL's
+		errors:     make(chan error, 1000),                        //Channel for collecting errors
 		limiter:    rate.NewLimiter(rate.Every(time.Second/5), 1), // 5 requests per second
+		client:     client,
 	}, nil
 }
 
@@ -83,7 +95,18 @@ func (c *Crawler) Crawl(startURL string, depth int) {
 	}
 
 	// Fetch the page
-	resp, err := http.Get(normalizedURL)
+	req, err := http.NewRequest("GET", normalizedURL, nil)
+	//Check if request creation failed
+	if err != nil {
+		c.errors <- fmt.Errorf("error creating request for %s: %v", normalizedURL, err)
+		return
+	}
+	//Set headers for fetching URL's
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.5")
+	req.Header.Set("Referer", c.baseURL.String())
+	resp, err := c.client.Do(req)
 	//Check if HTTP request failed
 	if err != nil {
 		c.errors <- fmt.Errorf("error fetching %s: %v", normalizedURL, err)
